@@ -1,158 +1,62 @@
-markdown# Robust Parameter Estimation via L1-Regression (Linear Programming)
+# Robust Regression: L1 vs L2
 
-## Overview
+Bardia Dorry (5866102), Sebastian James (6000546)
 
-This project implements a **robust linear/affine regression** method using **L1-estimation (Least Absolute Deviations)**. It is designed for datasets heavily corrupted by noise and outliers.
+## Idea
 
-Standard L2-regularization (Least Squares) penalizes residuals quadratically, making it extremely sensitive to outliers. A single outlier can drastically skew the fitted model. In contrast, L1-estimation penalizes residuals linearly, providing natural robustness against corrupted data points.
+When fitting a line to data, least squares (L2) gets thrown off by outliers because it penalizes big errors heavily. L1 regression (minimizing absolute residuals) is more robust because outliers don't blow up quadratically.
 
-Since the L1-norm is non-differentiable, we reformulate the problem as a **Linear Program (LP)** and solve it efficiently using standard LP solvers.
+We solve the L1 problem as a linear program (LP) by introducing slack variables:
+- minimize: Σ s_i
+- subject to: |Ax - y| ≤ s and s ≥ 0
 
----
+## Results
 
-## Mathematical Formulation
+With 50 measurements and 10 outliers (20% corruption):
 
-### Original Problem
-minimize    ||Ax - y||₁  =  Σᵢ |aᵢᵀx - yᵢ|
-plaintextwhere:
-- `A ∈ ℝᵐˣⁿ` is the design (measurement) matrix
-- `y ∈ ℝᵐ` is the observation vector (possibly corrupted)
-- `x ∈ ℝⁿ` is the unknown parameter vector
+| Method | Slope | Intercept | Error |
+|--------|-------|-----------|-------|
+| True | 2.0000 | -1.5000 | — |
+| L1 | 1.9652 | -1.5560 | 0.066 |
+| L2 | 1.6619 | -0.6422 | 0.922 |
 
-### LP Reformulation
+**L1 is 14× more accurate.** The plots show L1 stays close to the truth while L2 gets pulled toward the outliers.
 
-Since `|·|` is non-differentiable, we introduce slack variables `s ∈ ℝᵐ` and reformulate:
+As we add more outliers (0, 5, 10, 15, 20):
 
-| Component           | Formula                              |
-|---------------------|--------------------------------------|
-| Decision Variables  | `z = [x; s]` with `x ∈ ℝⁿ`, `s ∈ ℝᵐ` |
-| Objective           | `min  Σᵢ sᵢ`                        |
-| Constraint 1        | `Ax - y ≤ s`                         |
-| Constraint 2        | `y - Ax ≤ s`                         |
-| Bounds              | `s ≥ 0`, `x` free (unbounded)       |
+| Outliers | L1 Error | L2 Error |
+|----------|----------|----------|
+| 0 | 0.043 | 0.040 |
+| 5 | 0.045 | 0.694 |
+| 10 | 0.066 | 0.922 |
+| 15 | 0.042 | 1.334 |
+| 20 | 0.153 | 1.361 |
 
-### Why This Works
+L1 stays stable while L2 falls apart.
 
-The two inequality constraints together enforce:
-sᵢ ≥  (aᵢᵀx - yᵢ)
-sᵢ ≥ -(aᵢᵀx - yᵢ)
-plaintextThis is equivalent to `sᵢ ≥ |aᵢᵀx - yᵢ|`.
+## Implementation
 
-Since the objective minimizes `Σ sᵢ`, at the optimum each slack is tight:
-sᵢ* = |aᵢᵀx* - yᵢ|
-Therefore:
-min Σ sᵢ  ≡  min ||Ax - y||₁
-plaintext---
+We use `scipy.optimize.linprog` to solve the LP. The key insight is rewriting the non-smooth absolute value as a set of linear constraints.
 
-## Why L1 is Robust
+## Usage
 
-### Penalty Comparison
+```bash
+python main.py
+```
 
-| Residual `r` | L2 Penalty (`r²`) | L1 Penalty (`|r|`) |
-|:---:|:---:|:---:|
-| 0.5 | 0.25 | 0.5 |
-| 1.0 | 1.0 | 1.0 |
-| 5.0 | 25.0 | 5.0 |
-| 10.0 | **100.0** | 10.0 |
-
-### Key Insight
-
-- **L2 (Quadratic):** A single outlier with residual 10 contributes the same cost as 100 inliers with residual 1. The optimizer distorts the entire fit to reduce this one large penalty.
-- **L1 (Linear):** A single outlier with residual 10 contributes the same cost as only 10 inliers with residual 1. The optimizer can afford to "ignore" the outlier and fit the majority.
-
-### Breakdown Point
-
-- **L2 regression:** A single outlier can arbitrarily corrupt the solution.
-- **L1 regression:** Can tolerate up to ~50% outliers and still recover meaningful parameters.
-
----
-
-## Project Structure
-.
-├── l1_regression.py              # Main implementation and demo
-├── l1_vs_l2_robust_regression.png  # Output plot (generated after running)
-└── README.md                     # This file
-plaintext---
+Generates:
+- `l1_vs_l2_robust_regression.png`: comparison plot with fitted lines and residuals
+- `l1_vs_l2_outlier_sweep.png`: how error grows with outlier count
 
 ## Requirements
 
 - Python 3.7+
-- NumPy
-- SciPy (for `linprog` with HiGHS solver)
-- Matplotlib (for visualization)
-
-### Installation
+- NumPy, SciPy, Matplotlib
 
 ```bash
 pip install numpy scipy matplotlib
+```
 
-Usage
-Run the Demo
-python l1_regression.py
-This will:
+## Files
 
-Generate a synthetic affine dataset with 50 measurements and 10 outliers (20% corruption)
-Solve the L1 regression (robust) via LP
-Solve the L2 regression (standard least squares) for comparison
-Print parameter estimates and errors
-Save a comparison plot
-
-Use as a Module
-pythonimport numpy as np
-from l1_regression import l1_regression
-
-### Your design matrix and measurements
-
-A = np.column_stack([your_features, np.ones(m)])
-y = your_measurements
-
-### Solve
-
-x_opt, s_opt = l1_regression(A, y)
-
-print("Estimated parameters:", x_opt)
-print("Absolute residuals:", s_opt)
-### ```
-
----
-
-## Sample Output
-ROBUST PARAMETER ESTIMATION: L1 vs. L2 Regression
-Dataset: 50 measurements, 10 outliers (20% corruption)
-Parameter      True       L1 (Robust)    L2 (Least Sq.)
-Slope          2.0000     1.9956         1.6832
-Intercept      -1.5000    -1.4782        -0.4845
-L1 parameter error (||x_l1 - x_true||): 0.0226
-L2 parameter error (||x_l2 - x_true||): 1.0747
-L1 improvement factor: 47.6x more accurate
-Optimal L1 objective (Σ|residuals|): 9.8432
-plaintext---
-
-## Visualization
-
-The output plot shows:
-
-1. **Left panel:** Fitted regression lines (True, L1, L2) overlaid on the data with outliers highlighted in red.
-2. **Right panel:** Absolute residuals per measurement for both methods, with outlier positions shaded.
-
-The L1 fit closely matches the true line, while L2 is visibly pulled toward the outliers.
-
----
-
-## Extensions
-
-| Extension | Description |
-|-----------|-------------|
-| Weighted L1 | Add weights `wᵢ` to objective: `min Σ wᵢsᵢ` |
-| Huber Loss | Combine L2 for small residuals + L1 for large (smooth transition) |
-| Higher dimensions | Works directly — just expand the design matrix `A` |
-| Regularization | Add `λ‖x‖₁` to objective for sparse parameter estimation (LASSO) |
-| Equality constraints | Add known relationships `Cx = d` to the LP |
-
----
-
-## References
-
-1. Bloomfield, P. & Steiger, W. (1983). *Least Absolute Deviations: Theory, Applications and Algorithms*. Birkhäuser.
-2. Boyd, S. & Vandenberghe, L. (2004). *Convex Optimization*. Cambridge University Press. (Chapter 6: Approximation and Fitting)
-3. Huber, P. J. (1981). *Robust Statistics*. Wiley.
+- `main.py`: Generates synthetic data, solves both L1 and L2, makes plots
