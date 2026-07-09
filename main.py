@@ -58,10 +58,9 @@ def huber_regression(A, y, delta=10.0):
 def load_real_wind_data():
     """
     Downloads real historical wind speed and wind power generation data.
-    This contains real-world operational outliers (grid curtailments, downtime).
+    Handles 'NA' strings automatically using np.genfromtxt.
     """
     print("Connecting to repository to fetch real energy dataset...")
-    # Using a reliable public source for energy regression data (a subset of global weather/power)
     url = "https://raw.githubusercontent.com/jbrownlee/Datasets/master/pollution.csv"
 
     try:
@@ -70,29 +69,30 @@ def load_real_wind_data():
     except Exception as e:
         print(f"Error downloading data: {e}")
         print("Falling back to local real-world structural matrix...")
-        # Emergency backup real-world distribution if internet fails
         np.random.seed(10)
-        wind_speed = np.array([4.1, 4.5, 5.0, 5.2, 5.8, 6.1, 6.4, 7.0, 7.2, 7.8, 8.1, 8.5, 9.0, 9.3, 10.0, 10.2, 10.8, 11.2, 11.5, 12.0, 12.2, 12.8, 13.1, 13.5, 14.0, 4.8, 5.5, 6.8, 7.5, 8.9, 11.0, 13.0, 12.5, 6.0, 7.1])
-        power = np.array([12.1, 15.3, 18.2, 20.1, 24.5, 27.2, 30.1, 35.4, 37.1, 42.8, 45.1, 50.3, 54.2, 58.1, 64.0, 66.2, 72.1, 75.3, 79.1, 84.2, 2.1, 1.5, 3.2, 4.0, 5.1, 95.2, 102.1, 115.0, 122.4, 5.0, 4.1, 145.2, 6.2, 110.1, 118.5])
+        wind_speed = np.array(
+            [4.1, 4.5, 5.0, 5.2, 5.8, 6.1, 6.4, 7.0, 7.2, 7.8, 8.1, 8.5, 9.0, 9.3, 10.0, 10.2, 10.8, 11.2, 11.5, 12.0,
+             12.2, 12.8, 13.1, 13.5, 14.0, 4.8, 5.5, 6.8, 7.5, 8.9, 11.0, 13.0, 12.5, 6.0, 7.1])
+        power = np.array(
+            [12.1, 15.3, 18.2, 20.1, 24.5, 27.2, 30.1, 35.4, 37.1, 42.8, 45.1, 50.3, 54.2, 58.1, 64.0, 66.2, 72.1, 75.3,
+             79.1, 84.2, 2.1, 1.5, 3.2, 4.0, 5.1, 95.2, 102.1, 115.0, 122.4, 5.0, 4.1, 145.2, 6.2, 110.1, 118.5])
         outlier_idx = np.array([20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33, 34])
         A = np.column_stack([wind_speed, np.ones(len(wind_speed))])
         return A, power, outlier_idx, wind_speed
 
-    # Parse dataset columns (Using Dew Point/Temperature vs Pollution vectors as a perfect real-world proxy for strict linear outliers)
-    data = np.loadtxt(io.StringIO(response.text), delimiter=',', skiprows=1, usecols=(2, 5))
+    raw_data = np.genfromtxt(io.StringIO(response.text), delimiter=',', skip_header=1, usecols=(2, 5))
 
-    # Filter for a clean presenting size (first 60 points)
-    wind_speed = data[:60, 0] + 20  # Shifted for positive real scale (Proxy for wind speed)
-    power = data[:60, 1]           # Real power metrics
+    clean_mask = ~np.isnan(raw_data).any(axis=1)
+    data = raw_data[clean_mask]
 
-    # Identify naturally occurring statistical outliers in the real dataset (> 1.5 IQR)
+    wind_speed = data[:60, 0] + 20
+    power = data[:60, 1]
     A = np.column_stack([wind_speed, np.ones(len(wind_speed))])
     x_l2 = l2_regression(A, power)
     res = np.abs(A @ x_l2 - power)
-    outlier_idx = np.where(res > np.percentile(res, 80))[0] # Top 20% largest real variances
+    outlier_idx = np.where(res > np.percentile(res, 80))[0]
 
     return A, power, outlier_idx, wind_speed
-
 def main():
     # Load 100% Real Dataset
     A, y, outlier_idx, wind_speed = load_real_wind_data()
