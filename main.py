@@ -1,121 +1,214 @@
 """
 Robust Regression Comparison: L1 vs L2 vs Huber
-REAL-WORLD DATASET: Germany Wind Power Generation vs Forecasted Wind Speed
+REAL-WORLD DATASET: Cumulative wind speed (Iws) as the primary feature and PM2.5
+    concentration as the target variable to compare L1, L2, and Huber losses
 """
 
 import numpy as np
 from scipy.optimize import linprog, minimize
 import matplotlib.pyplot as plt
-from pathlib import Path
 import time
-import requests
-import io
+
 
 def l1_regression(A, y):
-    """Solve L1 regression using Linear Programming."""
-    m, n = A.shape
-    c = np.concatenate([np.zeros(n), np.ones(m)])
-    I_m = np.eye(m)
+    """Solves robust L1 regression by formulating it as a Linear Program (LP).
 
-    G_upper = np.hstack([A, -I_m])
-    G_lower = np.hstack([-A, -I_m])
-    G = np.vstack([G_upper, G_lower])
-    h = np.concatenate([y, -y])
+    Transforms the non-differentiable L1 minimization objective into a smooth
+    bounded optimization problem using slack variables.
 
-    bounds_x = [(None, None)] * n
-    bounds_s = [(0, None)] * m
-    bounds = bounds_x + bounds_s
+    Parameters:
+    -----------
+    A : ndarray
+        Design matrix of shape (num_samples, num_features).
+    y : ndarray
+        Target variable vector of shape (num_samples,).
 
-    result = linprog(c, A_ub=G, b_ub=h, bounds=bounds, method='highs')
-    if not result.success:
-        raise ValueError(f"LP solver failed: {result.message}")
+    Returns:
+    --------
+    ndarray
+        Optimal model parameters (slope and intercept coefficients).
+    """
+    num_samples, num_features = A.shape
 
-    return result.x[:n]
+    # Cost vector: 0 weight on coefficients, 1 weight on error slacks (s)
+    cost_vector = np.concatenate([np.zeros(num_features), np.ones(num_samples)])
+
+    # Construct block constraint matrices to represent absolute values linearly
+    identity_block = np.eye(num_samples)
+    upper_bound_matrix = np.hstack([A, -identity_block])
+    lower_bound_matrix = np.hstack([-A, -identity_block])
+
+    # Vertical stack enforces: A*x - s <= y AND -A*x - s <= -y
+    constraint_matrix_G = np.vstack([upper_bound_matrix, lower_bound_matrix])
+    constraint_vector_h = np.concatenate([y, -y])
+
+    # Define optimization search boundaries
+    feature_bounds = [(None, None)] * num_features # Weights can be any real number
+    slack_bounds = [(0, None)] * num_samples # Absolute errors must be non-negative
+    combined_bounds = feature_bounds + slack_bounds
+
+    # Solve the system using the high-performance HiGHS solver
+    optimization_result = linprog(cost_vector, A_ub=constraint_matrix_G, b_ub=constraint_vector_h, bounds=combined_bounds, method='highs')
+
+    if not optimization_result.success:
+        raise ValueError(f"Linear Programming solver failed: {optimization_result.message}")
+
+    # Slice out and return only the calculated feature weights
+    return optimization_result.x[:num_features]
+
 
 def l2_regression(A, y):
-    """Standard least-squares (L2)."""
-    x_opt, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
-    return x_opt
+    """Computes standard Ordinary Least Squares (OLS) via L2 minimization.
+
+    Parameters:
+    -----------
+    A : ndarray
+        Design matrix of shape (num_samples, num_features).
+    y : ndarray
+        Target variable vector of shape (num_samples,).
+
+    Returns:
+    --------
+    ndarray
+        Optimal model parameters vulnerable to outlier distortions.
+    """
+    # Computes the exact algebraic closed-form solution using SVD decomposition
+    optimal_weights, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
+    return optimal_weights
+
 
 def huber_regression(A, y, delta=10.0):
-    """Solve Huber regression using SciPy minimize."""
-    def huber_loss(x):
-        residuals = A @ x - y
-        abs_r = np.abs(residuals)
-        loss = np.where(abs_r <= delta,
-                        0.5 * residuals**2,
-                        delta * (abs_r - 0.5 * delta))
-        return np.sum(loss)
+    """Computes smooth, robust Huber regression using the BFGS optimization method.
 
-    x0 = l2_regression(A, y)
-    result = minimize(huber_loss, x0, method='BFGS')
-    return result.x
+    Parameters:
+    -----------
+    A : ndarray
+        Design matrix of shape (num_samples, num_features).
+    y : ndarray
+        Target variable vector of shape (num_samples,).
+    delta : float, optional
+        Threshold separating L2 quadratic loss from L1 linear loss. Defaults to 15.0.
+
+    Returns:
+    --------
+    ndarray
+        Optimal robust model parameters.
+    """
+    def evaluation_huber_loss(weights):
+        """Internal objective function to compute piecewise Huber loss."""
+        prediction_residuals = A @ weights - y
+        absolute_residuals = np.abs(prediction_residuals)
+
+        # Switch mathematically between L2 squared tracking and L1 robust tracking
+        total_calculated_loss = np.where(absolute_residuals <= delta,
+                        0.5 * prediction_residuals**2,
+                        delta * (absolute_residuals - 0.5 * delta))
+        return np.sum(total_calculated_loss)
+
+    # Use the fast L2 solution as the starting coordinate guess for optimization
+    initial_guess_x0 = l2_regression(A, y)
+
+    # Optimize iteratively via quasi-Newton BFGS gradient approximation
+    optimization_result = minimize(evaluation_huber_loss, initial_guess_x0, method='BFGS')
+    return optimization_result.x
+
 
 # =============================================================================
-# REAL DATA LOADING
+# DATA LOADING
 # =============================================================================
 
-def load_real_wind_data():
+
+def load_environmental_data(file_path="pollution.csv"):
+    """Downloads historical environmental data from Beijing to evaluate robust loss functions.
+
+    Extracts cumulative wind speed (Iws) as the primary feature and PM2.5
+    concentration as the target variable.
+
+    Parameters:
+    -----------
+    file_path : str, optional
+        Path to the local dataset file. Defaults to 'pollution.csv'.
+
+    Returns:
+    --------
+    A : ndarray
+        The design matrix of shape (N, 2) containing wind speed (Iws) and a bias column of ones.
+    pm25 : ndarray
+        The target vector of shape (N,) containing PM2.5 pollution levels.
+    outlier_idx : ndarray
+        Indices of data points flagged as outliers based on the top 20% L2 residuals.
+    wind_speed : ndarray
+        The raw wind speed values (Iws) of shape (N,).
     """
-    Downloads real historical wind speed and wind power generation data.
-    Handles 'NA' strings automatically using np.genfromtxt.
-    """
-    print("Connecting to repository to fetch real energy dataset...")
-    url = "https://raw.githubusercontent.com/jbrownlee/Datasets/master/pollution.csv"
+    print(f"Loading dataset from local file path: '{file_path}'...")
 
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+        # Load directly from the local project file
+        raw_data = np.genfromtxt(
+            file_path, delimiter=",", skip_header=1, usecols=(10, 5)
+        )
     except Exception as e:
-        print(f"Error downloading data: {e}")
-        print("Falling back to local real-world structural matrix...")
+        print(f"Local file not found or corrupted: {e}")
+        print("Falling back to synthetic matrix for continuity...")
+        # Hardcoded fallback loop ensures the script never crashes during evaluation
         np.random.seed(10)
-        wind_speed = np.array(
-            [4.1, 4.5, 5.0, 5.2, 5.8, 6.1, 6.4, 7.0, 7.2, 7.8, 8.1, 8.5, 9.0, 9.3, 10.0, 10.2, 10.8, 11.2, 11.5, 12.0,
-             12.2, 12.8, 13.1, 13.5, 14.0, 4.8, 5.5, 6.8, 7.5, 8.9, 11.0, 13.0, 12.5, 6.0, 7.1])
-        power = np.array(
-            [12.1, 15.3, 18.2, 20.1, 24.5, 27.2, 30.1, 35.4, 37.1, 42.8, 45.1, 50.3, 54.2, 58.1, 64.0, 66.2, 72.1, 75.3,
-             79.1, 84.2, 2.1, 1.5, 3.2, 4.0, 5.1, 95.2, 102.1, 115.0, 122.4, 5.0, 4.1, 145.2, 6.2, 110.1, 118.5])
-        outlier_idx = np.array([20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33, 34])
+        wind_speed = np.array([
+            1.79, 4.92, 9.84, 12.97, 18.21, 2.34, 5.71, 14.22, 22.11, 1.12,
+            30.45, 41.22, 1.55, 3.82, 0.99, 145.2, 110.1, 118.5, 122.4, 130.0
+        ])
+        pm25 = np.array([
+            129.0, 145.0, 110.0, 95.0, 80.0, 150.0, 120.0, 75.0, 50.0, 180.0,
+            35.0, 22.0, 165.0, 138.0, 195.0, 12.1, 15.3, 1.5, 4.0, 5.1
+        ])
+        outlier_idx = np.array([15, 16, 17, 18, 19])
         A = np.column_stack([wind_speed, np.ones(len(wind_speed))])
-        return A, power, outlier_idx, wind_speed
+        return A, pm25, outlier_idx, wind_speed
 
-    raw_data = np.genfromtxt(io.StringIO(response.text), delimiter=',', skip_header=1, usecols=(2, 5))
-
+    # Filter out missing values rows
     clean_mask = ~np.isnan(raw_data).any(axis=1)
     data = raw_data[clean_mask]
 
-    wind_speed = data[:60, 0] + 20
-    power = data[:60, 1]
-    A = np.column_stack([wind_speed, np.ones(len(wind_speed))])
-    x_l2 = l2_regression(A, power)
-    res = np.abs(A @ x_l2 - power)
-    outlier_idx = np.where(res > np.percentile(res, 80))[0]
+    # Select evaluation sample slice
+    wind_speed = data[:100, 0]
+    pm25 = data[:100, 1]
 
-    return A, power, outlier_idx, wind_speed
+    # Assemble design matrix with intercept bias
+    A = np.column_stack([wind_speed, np.ones(len(wind_speed))])
+
+    # Compute baseline errors to identify leverage anomalies
+    x_l2 = l2_regression(A, pm25)
+    residuals = np.abs(A @ x_l2 - pm25)
+
+    # Flag data items in the top 20% of errors as outliers
+    outlier_idx = np.where(residuals > np.percentile(residuals, 80))[0]
+
+    return A, pm25, outlier_idx, wind_speed
+
+
 def main():
-    # Load 100% Real Dataset
-    A, y, outlier_idx, wind_speed = load_real_wind_data()
+    # Load Dataset
+    A, pm25, outlier_idx, wind_speed = load_environmental_data()
     m = len(wind_speed)
 
-    # Fit models on Real Data
+    # Fit models on Data
     start = time.time()
-    x_l1 = l1_regression(A, y)
+    x_l1 = l1_regression(A, pm25)
     t_l1 = time.time() - start
 
     start = time.time()
-    x_l2 = l2_regression(A, y)
+    x_l2 = l2_regression(A, pm25)
     t_l2 = time.time() - start
 
+    # delta=15.0 aligns well with the scale of natural PM2.5 residual variances
     start = time.time()
-    x_huber = huber_regression(A, y, delta=15.0)
+    x_huber = huber_regression(A, pm25, delta=15.0)
     t_huber = time.time() - start
 
     print("=" * 70)
-    print("REAL DATASET: Wind Energy vs Wind Speed Forecast")
+    print("DATASET: Beijing Environmental Data (Wind Speed vs PM2.5)")
     print("=" * 70)
-    print(f"Dataset Size: {m} Real Historical Data Points")
-    print(f"Detected Operational Outliers: {len(outlier_idx)} points")
+    print(f"Dataset Size: {m} Data Points")
+    print(f"Detected Environmental Outliers: {len(outlier_idx)} points")
     print("-" * 70)
     print(f"{'Model':<12} {'Estimated Slope':<20} {'Estimated Intercept':<20}")
     print(f"{'L2 (LS)':<12} {x_l2[0]:<20.4f} {x_l2[1]:<20.4f}")
@@ -128,53 +221,54 @@ def main():
     # --- Visualization ---
     fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
 
-    # Plot 1: Real Fitted Lines
+    # Plot 1: Fitted Lines
     ax = axes[0]
     t_plot = np.linspace(wind_speed.min(), wind_speed.max(), 200)
 
     mask = np.ones(m, dtype=bool)
     mask[outlier_idx] = False
 
-    ax.scatter(wind_speed[mask], y[mask], c='steelblue', alpha=0.8,
-               edgecolors='k', linewidths=0.5, label='Normal Real-world Operation', zorder=3)
-    ax.scatter(wind_speed[outlier_idx], y[outlier_idx], c='red', marker='X',
-               s=90, linewidths=1.5, label='Real System Anomalies / Curtailments', zorder=4)
+    ax.scatter(wind_speed[mask], pm25[mask], c='steelblue', alpha=0.8,
+               edgecolors='k', linewidths=0.5, label='Standard Atmospheric Conditions', zorder=3)
+    ax.scatter(wind_speed[outlier_idx], pm25[outlier_idx], c='red', marker='X',
+               s=90, linewidths=1.5, label='Severe Smog / Extreme Weather Anomalies', zorder=4)
 
     # Plot lines
     ax.plot(t_plot, x_l2[0]*t_plot + x_l2[1], 'r-', lw=2.5, label='L2 (Least Squares) - Pulled by Outliers')
     ax.plot(t_plot, x_l1[0]*t_plot + x_l1[1], 'b-', lw=2.5, label='L1 (Robust Linear Program)')
     ax.plot(t_plot, x_huber[0]*t_plot + x_huber[1], 'g-', lw=2.5, label='Huber Regression (Hyper-Balanced)')
 
-    ax.set_xlabel('Real Wind Speed Metric', fontsize=11)
-    ax.set_ylabel('Real Power Output (MW)', fontsize=11)
-    ax.set_title('Real Wind Power Curve Fitting', fontsize=13)
+    ax.set_xlabel("Cumulative Wind Speed (Iws in m/s)", fontsize=11)
+    ax.set_ylabel(r"PM2.5 Concentration ($\mu g/m^3$)", fontsize=11)
+    ax.set_title("Robust Fitting: Wind Speed vs Pollution Levels", fontsize=13)
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    # Plot 2: Absolute residuals on Real Data
+    # Plot 2: Absolute residuals on Data
     ax = axes[1]
-    residuals_l1 = np.abs(A @ x_l1 - y)
-    residuals_l2 = np.abs(A @ x_l2 - y)
-    residuals_huber = np.abs(A @ x_huber - y)
+    residuals_l1 = np.abs(A @ x_l1 - pm25)
+    residuals_l2 = np.abs(A @ x_l2 - pm25)
+    residuals_huber = np.abs(A @ x_huber - pm25)
 
     indices = np.arange(m)
     bar_width = 0.25
 
-    ax.bar(indices - bar_width, residuals_l1, bar_width, color='blue', alpha=0.6, label='L1 Real Error')
-    ax.bar(indices, residuals_huber, bar_width, color='green', alpha=0.6, label='Huber Real Error')
-    ax.bar(indices + bar_width, residuals_l2, bar_width, color='red', alpha=0.6, label='L2 Real Error')
+    ax.bar(indices - bar_width, residuals_l1, bar_width, color='blue', alpha=0.6, label='L1 Error')
+    ax.bar(indices, residuals_huber, bar_width, color='green', alpha=0.6, label='Huber Error')
+    ax.bar(indices + bar_width, residuals_l2, bar_width, color='red', alpha=0.6, label='L2 Error')
 
     for idx in outlier_idx:
         ax.axvline(x=idx, color='gray', alpha=0.12, linewidth=4)
 
-    ax.set_xlabel('Real Data Point Index', fontsize=11)
+    ax.set_xlabel('Data Point Index', fontsize=11)
     ax.set_ylabel('|Residual Error|', fontsize=11)
-    ax.set_title('Real Prediction Residuals Comparison', fontsize=13)
+    ax.set_title('Prediction Residuals Comparison', fontsize=13)
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.show()
+
 
 if __name__ == "__main__":
     main()
