@@ -7,7 +7,7 @@ REAL-WORLD DATASET: Cumulative wind speed (Iws) as the primary feature and PM2.5
 import numpy as np
 from scipy.optimize import linprog, minimize
 import matplotlib.pyplot as plt
-import time
+import sys, time
 
 
 def l1_regression(A, y):
@@ -149,20 +149,7 @@ def load_environmental_data(file_path="pollution.csv"):
         )
     except Exception as e:
         print(f"Local file not found or corrupted: {e}")
-        print("Falling back to synthetic matrix for continuity...")
-        # Hardcoded fallback loop ensures the script never crashes during evaluation
-        np.random.seed(10)
-        wind_speed = np.array([
-            1.79, 4.92, 9.84, 12.97, 18.21, 2.34, 5.71, 14.22, 22.11, 1.12,
-            30.45, 41.22, 1.55, 3.82, 0.99, 145.2, 110.1, 118.5, 122.4, 130.0
-        ])
-        pm25 = np.array([
-            129.0, 145.0, 110.0, 95.0, 80.0, 150.0, 120.0, 75.0, 50.0, 180.0,
-            35.0, 22.0, 165.0, 138.0, 195.0, 12.1, 15.3, 1.5, 4.0, 5.1
-        ])
-        outlier_idx = np.array([15, 16, 17, 18, 19])
-        A = np.column_stack([wind_speed, np.ones(len(wind_speed))])
-        return A, pm25, outlier_idx, wind_speed
+        sys.exit(1)  # Exit code 1 indicates an error
 
     # Filter out missing values rows
     clean_mask = ~np.isnan(raw_data).any(axis=1)
